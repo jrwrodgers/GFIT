@@ -1,0 +1,6 @@
+train: C:\Users\jrwro\Documents\GitHub\GFIT\YOLO\train
+val: C:\Users\jrwro\Documents\GitHub\GFIT\YOLO\val
+
+nc : 2
+
+names: ["flag","gate"]
