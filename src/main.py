@@ -1,10 +1,18 @@
+import json
+from operator import truediv
+
 import cv2
 import tkinter as tk
 from tkinter import filedialog
 from PIL import Image, ImageTk
 import os
+import glob
+from pathlib import Path
 
-class AnnotatorApp:
+
+DEBUG=True
+
+class TaggerApp:
     def __init__(self, root):
         self.root = root
         self.cap = None
@@ -23,21 +31,28 @@ class AnnotatorApp:
         self.pan_start_x = None
         self.pan_start_y = None
 
-        self.current_class = 0  # 0=Gate, 1=Flag
-        self.annotation_counts = {0: 0, 1: 0}
-        self.saved_frames = set()
+        # self.current_class = 0  # 0=Gate, 1=Flag, 3=pip, 4=quad
+        # self.annotation_counts = {0: 0, 1: 0}
+        self.saved_items = []
+        self.state = 0 #1 for a gate , 2 for a flag
+        self.points = []
+        self.show_bounding_box = False
+
 
         # Canvas
         self.canvas = tk.Canvas(root, width=self.canvas_w, height=self.canvas_h, bg="black")
+        self.canvas.bind("<KeyPress>", self.on_key_press)
         self.canvas.pack(fill=tk.BOTH, expand=True)
+        self.canvas.focus_set()
         self.canvas.bind("<Configure>", self.resize_canvas)
         self.canvas.bind("<Button-1>", self.on_click)
         self.canvas.bind("<B1-Motion>", self.on_drag)
         self.canvas.bind("<Button-3>", self.start_pan)
         self.canvas.bind("<B3-Motion>", self.do_pan)
         self.canvas.bind("<MouseWheel>", self.on_zoom)
-        self.canvas.bind("<Button-4>", lambda e: self.on_zoom(e, delta=1))  # Linux
-        self.canvas.bind("<Button-5>", lambda e: self.on_zoom(e, delta=-1)) # Linux
+        self.canvas.bind("<Button-4>", lambda e: self.on_zoom(e, delta=1))
+        self.canvas.bind("<Button-5>", lambda e: self.on_zoom(e, delta=-1))
+        self.canvas.bind("<KeyPress>", self.on_key_press)
 
         # Buttons
         btn_frame = tk.Frame(root)
@@ -45,15 +60,57 @@ class AnnotatorApp:
         tk.Button(btn_frame, text="Load Video", command=self.load_video).pack(side=tk.LEFT)
         tk.Button(btn_frame, text="<< Prev", command=self.prev_frame).pack(side=tk.LEFT)
         tk.Button(btn_frame, text="Next >>", command=self.next_frame).pack(side=tk.LEFT)
-        tk.Button(btn_frame, text="Gate", command=lambda: self.set_class(0)).pack(side=tk.LEFT)
-        tk.Button(btn_frame, text="Flag", command=lambda: self.set_class(1)).pack(side=tk.LEFT)
-
+        tk.Button(btn_frame, text="Save", command=self.save_object).pack(side=tk.LEFT)
+        tk.Button(btn_frame, text="Close", command=self.close).pack(side=tk.LEFT)
         self.stats_label = tk.Label(root, text="", font=("Arial", 10))
         self.stats_label.pack()
-
         self.progress_canvas = tk.Canvas(root, height=20, bg="gray")
         self.progress_canvas.pack(fill=tk.X)
         self.progress_canvas.bind("<Button-1>", self.scrub_to_frame)
+
+        self.checkbox_row = tk.Frame(root)  # Use CTkFrame for styling
+        self.checkbox_row.pack()
+
+        # Checkbox container
+
+        self.check_var_1 = tk.StringVar(value="off")
+        checkbox_top = tk.Checkbutton(
+            master=self.checkbox_row,
+            text="Show Bounding Boxes",
+            variable=self.check_var_1,
+            command=self.bounding_box_toggle
+        )
+        checkbox_top.pack()  # Top gap, no bottom gap
+
+    def bounding_box_toggle(self):
+        if self.show_bounding_box:
+            self.show_bounding_box = False
+        else:
+            self.show_bounding_box = True
+        print(self.show_bounding_box)
+        self.refresh_canvas()
+
+    def close(self):
+        self.root.destroy()
+
+    def on_key_press(self, event):
+        key = event.char
+        if DEBUG:
+            print(f"Key press: {key}")
+        if key.lower() == "f" and self.state == 0:
+            self.state = 1
+        elif key.lower() == "g" and self.state == 0:
+            self.state = 2
+        elif key.lower() == "h" and self.state == 0:
+            self.state = 3
+        elif key.lower() == "j" and self.state == 0:
+            self.state = 4
+        elif event.keysym == "Escape":
+            self.state = 0
+            self.points.clear()
+            self.refresh_canvas()
+
+
 
     def resize_canvas(self, event):
         self.canvas_w, self.canvas_h = event.width, event.height
@@ -65,12 +122,22 @@ class AnnotatorApp:
         self.cap = cv2.VideoCapture(path)
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.filename = os.path.splitext(os.path.basename(path))[0]
-        os.makedirs("annotations", exist_ok=True)
+        os.makedirs("processed", exist_ok=True)
         self.frame_index = 0
-        self.points.clear()
-        self.saved_frames.clear()
-        self.annotation_counts = {0: 0, 1: 0}
+
+        #self.buffered_frames = [] #buffer the frame every 10th say
+        path = f"{self.filename}_polygons.json"
+        try:
+            with open(path, "r") as file:
+                data = json.load(file)
+                data_in_frames = []
+                for item in data:
+                    data_in_frames.append(item["frame"])
+            self.saved_items = data_in_frames
+        except FileNotFoundError:
+            print("No existing objects .json file found")
         self.load_frame()
+
 
     def load_frame(self):
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.frame_index)
@@ -81,30 +148,9 @@ class AnnotatorApp:
         self.offset_x = 0
         self.offset_y = 0
         self.zoom_scale = 1.0
-
-        # Load existing annotation
-        path = f"annotations/{self.filename}_{self.frame_index:04d}.txt"
-        if os.path.exists(path):
-            with open(path) as f:
-                lines = f.readlines()
-            if lines:
-                class_id, xc, yc, bw, bh = map(float, lines[-1].strip().split())
-                img_h, img_w = self.original_frame.shape[:2]
-                x = xc * img_w
-                y = yc * img_h
-                w = bw * img_w
-                h = bh * img_h
-                x1, x2 = x - w / 2, x + w / 2
-                y1, y2 = y - h / 2, y + h / 2
-                self.points = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
-                self.current_class = int(class_id)
-                self.saved_frames.add(self.frame_index)
-                self.annotation_counts[self.current_class] += 1
         self.refresh_canvas()
 
-    def set_class(self, class_id):
-        self.current_class = class_id
-        self.refresh_canvas()
+
 
     def refresh_canvas(self):
         self.canvas.delete("all")
@@ -123,21 +169,97 @@ class AnnotatorApp:
         self.canvas.create_image(center_x, center_y, anchor=tk.NW, image=self.tk_img)
 
         # Draw annotation
-        transformed_pts = [(int(center_x + p[0]*scale), int(center_y + p[1]*scale)) for p in self.points]
-        for x, y in transformed_pts:
-            self.canvas.create_oval(x-5, y-5, x+5, y+5, fill="red")
-        if len(transformed_pts) == 4:
-            color = "green" if self.current_class == 0 else "blue"
-            self.canvas.create_polygon(transformed_pts, outline=color, fill="", width=2)
+        if DEBUG:
+            if self.state == 1:
+                print(f"Selecting a flag, npoints = {len(self.points)}")
+            elif self.state == 2:
+                print(f"Selecting a gate, npoints = {len(self.points)}")
+            elif self.state == 3:
+                print(f"Selecting a pip, npoints = {len(self.points)}")
+
+        if self.state != 0:
+            if self.state == 1:
+                colour = "blue"
+            else:
+                colour = "red"
+            transformed_pts = [(int(center_x + p[0]*scale), int(center_y + p[1]*scale)) for p in self.points]
+            for x, y in transformed_pts:
+                self.canvas.create_oval(x-5, y-5, x+5, y+5, fill=colour)
+            if len(transformed_pts) == 4:
+                self.canvas.create_polygon(transformed_pts, outline=colour, stipple="gray50", width=2)
+
+
+        if self.frame_index in self.saved_items:
+            if DEBUG:
+                print(f"redrawing saved objects")
+            path = f"{self.filename}_polygons.json"
+            try:
+                with open(path, "r") as file:
+                    data = json.load(file)
+                if DEBUG:
+                    print(f"saved objects{data}")
+                for object in data:
+                    if object["frame"] == self.frame_index:
+                        object_points=[]
+                        if object["class_id"] == 0:
+                            colour = "blue"
+                        elif object["class_id"] == 1:
+                            colour = "red"
+                        elif object["class_id"] == 2:
+                            colour = "cyan"
+                        elif object["class_id"] == 3:
+                            colour = "pink"
+                        else:
+                            colour = "green"
+
+                        for point in object["points"]:
+                            # transformed_pts = [(int(center_x + p[0] * scale), int(center_y + p[1] * scale)) for p in
+                            #                    self.points]
+                            x = center_x + point[0] * scale
+                            y = center_y + point[1] * scale
+                            object_points.append((x, y))
+                            self.canvas.create_oval(x-5, y-5, x+5, y+5, fill="yellow")
+                        self.canvas.create_polygon(object_points, outline=colour, stipple="gray50", width=2)
+            except FileNotFoundError:
+                print(f"saved objects not found")
+
+            if self.show_bounding_box:
+                print(f"drawing bounding box")
+                path_root = "processed/"
+                path_pattern = f"{self.filename}_{self.frame_index:04d}*.txt"
+                print(f"{path_root}{path_pattern}")
+                files = glob.glob(os.path.join(path_root, path_pattern))
+                print(f"found {files}")
+                img_h, img_w = self.original_frame.shape[:2]
+                for object_file in files:
+                    print(f"processing {object_file}")
+                    try:
+                        with open(object_file, "r") as file:
+                            for line in file.readlines():
+                                print(line)
+                                numbers = list(map(float, line.strip().split()))
+                                #print(numbers)
+
+                                x = numbers[1] * img_w
+                                y = numbers[2] * img_h
+                                w = numbers[3] * img_w
+                                h = numbers[4] * img_h
+                                x1, x2 =center_x +(x - w / 2)* scale, center_x +(x + w / 2)* scale
+                                y1, y2 = center_y+ (y - h / 2)* scale,center_y+ (y + h / 2)* scale
+                                object_points = [(x1, y1), (x1, y2), (x2, y2), (x2, y1)]
+                                #print(object_points)
+                                self.canvas.create_polygon(object_points, outline="deeppink", stipple="gray50", width=1)
+                    except FileNotFoundError:
+                        print(f"File {path} not found")
+
 
         # Auto-save
-        if len(self.points) == 4:
-            self.save_annotation()
+        # if len(self.points) == 4:
+        #     self.save_annotation()
 
-        self.update_stats()
         self.draw_progress_bar()
 
-    def save_annotation(self):
+    def save_object(self):
         img_h, img_w = self.original_frame.shape[:2]
         x_coords = [p[0] for p in self.points]
         y_coords = [p[1] for p in self.points]
@@ -149,19 +271,61 @@ class AnnotatorApp:
         box_w = (x_max - x_min) / img_w
         box_h = (y_max - y_min) / img_h
 
-        class_id = self.current_class
-        path = f"annotations/{self.filename}_{self.frame_index:04d}.txt"
+        class_id = self.state - 1
+        ### check if file exists, need to create _1 _2 _3 for the number of items in this frame
+
+        path_root = f"processed/{self.filename}_{self.frame_index:04d}"
+        path_exists = True
+        n=1
+        while path_exists:
+            if os.path.exists(f"{path_root}.txt"):
+                print(f"File {path_root} already exists incrementing")
+                path_root=f"processed/{self.filename}_{self.frame_index:04d}_{n}"
+                n+=1
+            else:
+                path_exists=False
+                print(f"Creating new file {path_root}")
+
+        path = path_root + ".txt"
         with open(path, "w") as f:
             f.write(f"{class_id} {x_center:.6f} {y_center:.6f} {box_w:.6f} {box_h:.6f}\n")
 
-        self.saved_frames.add(self.frame_index)
 
-    def update_stats(self):
-        stats = (
-            f"Frame: {self.frame_index + 1}/{self.total_frames}  |  "
-            f"Gates: {self.annotation_counts[0]}  |  Flags: {self.annotation_counts[1]}"
-        )
-        self.stats_label.config(text=stats)
+        ## save the video frame
+        #path = f"processed/{self.filename}_{self.frame_index:04d}.jpg"
+        path = path_root + ".jpg"
+        cv2.imwrite(path, self.original_frame)
+
+        # save the polygons
+        path = f"{self.filename}_polygons.json"
+        try:
+            with open(path, "r") as file:
+                data = json.load(file)
+        except FileNotFoundError:
+            data = []  # Create new list if file doesn't exist
+
+        data_object = {"frame": self.frame_index,
+                "class_id": class_id,
+                "points": self.points
+                }
+        data.append(data_object)
+
+        with open(path, "w") as f:
+            f.write(json.dumps(data, indent=4))
+
+
+        self.state=0
+        self.points.clear()
+        self.saved_items.append(self.frame_index)
+        self.refresh_canvas()
+
+
+    # def update_stats(self):
+    #     stats = (
+    #         f"Frame: {self.frame_index + 1}/{self.total_frames}  |  "
+    #         f"Gates: {self.annotation_counts[0]}  |  Flags: {self.annotation_counts[1]}"
+    #     )
+    #     self.stats_label.config(text=stats)
 
     def draw_progress_bar(self):
         self.progress_canvas.delete("all")
@@ -169,7 +333,7 @@ class AnnotatorApp:
         bar_w = self.progress_canvas.winfo_width()
         self.progress_canvas.create_rectangle(0, 0, bar_w, 20, fill="lightgray")
 
-        for idx in self.saved_frames:
+        for idx in self.saved_items:
             x = int(bar_w * idx / self.total_frames)
             self.progress_canvas.create_line(x, 0, x, 20, fill="darkgreen", width=2)
 
@@ -191,20 +355,21 @@ class AnnotatorApp:
         center_y = (self.canvas_h - img_h * scale) // 2 + self.offset_y
         x = (event.x - center_x) / scale
         y = (event.y - center_y) / scale
+        if self.state != 0:
+            if len(self.points) < 4:
+                self.points.append((x, y))
 
-        if len(self.points) < 4:
-            self.points.append((x, y))
-        else:
-            for i, (px, py) in enumerate(self.points):
-                dx = px * scale + center_x - event.x
-                dy = py * scale + center_y - event.y
-                if dx ** 2 + dy ** 2 < 100:
-                    self.dragging_point = i
-                    break
+        for i, (px, py) in enumerate(self.points):
+            dx = px * scale + center_x - event.x
+            dy = py * scale + center_y - event.y
+            if dx ** 2 + dy ** 2 < 100:
+                self.dragging_point = i
+                break
         self.refresh_canvas()
 
     def on_drag(self, event):
         if self.dragging_point is None: return
+        if self.state == 0: return
         img_h, img_w = self.original_frame.shape[:2]
         scale = min(self.canvas_w / img_w, self.canvas_h / img_h) * self.zoom_scale
         center_x = (self.canvas_w - img_w * scale) // 2 + self.offset_x
@@ -264,6 +429,6 @@ class AnnotatorApp:
 # Entry Point
 if __name__ == "__main__":
     root = tk.Tk()
-    root.title("FPV Annotator")
-    AnnotatorApp(root)
+    root.title("FPV Image Tagger ")
+    TaggerApp(root)
     root.mainloop()
