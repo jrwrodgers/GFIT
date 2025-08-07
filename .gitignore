@@ -2,3 +2,5 @@ src/processed
 YOLO/train
 YOLO/val
 YOLO/runs
+build/
+dist/
