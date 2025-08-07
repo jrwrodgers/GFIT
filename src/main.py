@@ -53,13 +53,16 @@ class TaggerApp:
         self.canvas.bind("<Button-4>", lambda e: self.on_zoom(e, delta=1))
         self.canvas.bind("<Button-5>", lambda e: self.on_zoom(e, delta=-1))
         self.canvas.bind("<KeyPress>", self.on_key_press)
+        self.canvas.bind("<space>", self.on_space)
 
         # Buttons
         btn_frame = tk.Frame(root)
         btn_frame.pack()
         tk.Button(btn_frame, text="Load Video", command=self.load_video).pack(side=tk.LEFT)
-        tk.Button(btn_frame, text="<< Prev", command=self.prev_frame).pack(side=tk.LEFT)
-        tk.Button(btn_frame, text="Next >>", command=self.next_frame).pack(side=tk.LEFT)
+        tk.Button(btn_frame, text="<<< Prev", command= lambda: self.prev_frame(15)).pack(side=tk.LEFT)
+        tk.Button(btn_frame, text="< Prev", command= lambda: self.prev_frame(1)).pack(side=tk.LEFT)
+        tk.Button(btn_frame, text="Next >", command= lambda: self.next_frame(1)).pack(side=tk.LEFT)
+        tk.Button(btn_frame, text="Next >>>", command= lambda: self.next_frame(15)).pack(side=tk.LEFT)
         tk.Button(btn_frame, text="Save", command=self.save_object).pack(side=tk.LEFT)
         tk.Button(btn_frame, text="Close", command=self.close).pack(side=tk.LEFT)
         self.stats_label = tk.Label(root, text="", font=("Arial", 10))
@@ -67,6 +70,12 @@ class TaggerApp:
         self.progress_canvas = tk.Canvas(root, height=20, bg="gray")
         self.progress_canvas.pack(fill=tk.X)
         self.progress_canvas.bind("<Button-1>", self.scrub_to_frame)
+
+        self.framecount_row = tk.Frame(root)  # Use CTkFrame for styling
+        self.framecount_row.pack()
+
+        self.frame_label = tk.Label(self.framecount_row, text=f"Frame={self.frame_index}", bg="white", font=("Arial", 14))
+        self.frame_label.pack(side=tk.LEFT)
 
         self.checkbox_row = tk.Frame(root)  # Use CTkFrame for styling
         self.checkbox_row.pack()
@@ -82,6 +91,20 @@ class TaggerApp:
         )
         checkbox_top.pack()  # Top gap, no bottom gap
 
+        self.text_row = tk.Frame(root)  # Use CTkFrame for styling
+        self.text_row.pack()
+        instructions=("Key Commands:\n f = start marking a flag \n"
+                      "\"g\" = start marking a gate \n"
+                      "\"h\" = start marking a cone \n"
+                      "\"j\" = start marking a drone \n"
+                      "\"ESC\" = stop marking\n"
+                      "\"SPACE\" = save the marked object")
+        label = tk.Label(self.text_row, text=instructions, bg="white", font=("Arial", 14), justify=tk.LEFT)
+        label.pack(pady=10)
+
+    def on_space(self,event):
+        self.save_object()
+
     def bounding_box_toggle(self):
         if self.show_bounding_box:
             self.show_bounding_box = False
@@ -92,6 +115,8 @@ class TaggerApp:
 
     def close(self):
         self.root.destroy()
+
+    #### space to save
 
     def on_key_press(self, event):
         key = event.char
@@ -153,6 +178,7 @@ class TaggerApp:
 
 
     def refresh_canvas(self):
+        self.frame_label.config(text=f"Frame={self.frame_index}")
         self.canvas.delete("all")
         if self.original_frame is None: return
 
@@ -414,17 +440,15 @@ class TaggerApp:
         self.pan_start_y = event.y
         self.refresh_canvas()
 
-    def prev_frame(self):
-        if self.frame_index > 0:
-            self.frame_index -= 1
-            self.points.clear()
-            self.load_frame()
+    def prev_frame(self,n):
+        self.frame_index -= n
+        self.points.clear()
+        self.load_frame()
 
-    def next_frame(self):
-        if self.frame_index < self.total_frames - 1:
-            self.frame_index += 1
-            self.points.clear()
-            self.load_frame()
+    def next_frame(self,n):
+        self.frame_index += n
+        self.points.clear()
+        self.load_frame()
 
 # Entry Point
 if __name__ == "__main__":
